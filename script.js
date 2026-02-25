@@ -4,9 +4,10 @@ const ctx = canvas.getContext("2d");
 const startOverlay = document.getElementById("startOverlay");
 const gameOverOverlay = document.getElementById("gameOverOverlay");
 const restartBtn = document.getElementById("restartBtn");
+const canvasWrap = document.querySelector(".canvas-wrap");
 
 const scoreValue = document.getElementById("scoreValue");
-const missValue = document.getElementById("missValue");
+const sizeValue = document.getElementById("sizeValue");
 const highValue = document.getElementById("highValue");
 const finalScore = document.getElementById("finalScore");
 const bestScore = document.getElementById("bestScore");
@@ -20,8 +21,7 @@ const WORLD = {
   floorY: canvas.height - 44,
 };
 
-const MAX_MISSES = 3;
-const FISH_GROUP_SIZE = 4;
+const MAX_GROWTH_MULTIPLIER = 3;
 
 let highScore = Number(localStorage.getItem("flappySharkHighScore") || 0);
 highValue.textContent = String(highScore);
@@ -30,13 +30,15 @@ const state = {
   mode: "start",
   shark: null,
   fishSchools: [],
+  obstacles: [],
   bubbles: [],
   score: 0,
-  misses: 0,
   speed: 2.2,
-  spawnEveryMs: 1650,
+  fishSpawnEveryMs: 1650,
+  obstacleSpawnEveryMs: 2100,
   elapsedMs: 0,
-  lastSpawnMs: 0,
+  lastFishSpawnMs: 0,
+  lastObstacleSpawnMs: 0,
   lastTime: 0,
 };
 
@@ -45,22 +47,26 @@ function resetGame() {
   state.shark = {
     x: 104,
     y: WORLD.height * 0.48,
-    w: 84,
-    h: 42,
+    baseW: 84,
+    baseH: 42,
+    scale: 1,
     vy: 0,
     flapTick: 0,
+    biteTimer: 0,
   };
   state.fishSchools = [];
+  state.obstacles = [];
   state.bubbles = makeBubbles(24);
   state.score = 0;
-  state.misses = 0;
   state.speed = 2.2;
-  state.spawnEveryMs = 1650;
+  state.fishSpawnEveryMs = 1650;
+  state.obstacleSpawnEveryMs = 2100;
   state.elapsedMs = 0;
-  state.lastSpawnMs = 0;
+  state.lastFishSpawnMs = 0;
+  state.lastObstacleSpawnMs = 0;
 
   scoreValue.textContent = "0";
-  missValue.textContent = `0 / ${MAX_MISSES}`;
+  sizeValue.textContent = "x1.0";
 
   startOverlay.classList.remove("overlay-visible");
   gameOverOverlay.classList.remove("overlay-visible");
@@ -76,19 +82,41 @@ function makeBubbles(count) {
   }));
 }
 
+function sharkSize() {
+  const s = state.shark;
+  return {
+    w: s.baseW * s.scale,
+    h: s.baseH * s.scale,
+  };
+}
+
+function sharkHitbox() {
+  const s = state.shark;
+  const size = sharkSize();
+  return {
+    x: s.x - size.w * 0.34,
+    y: s.y - size.h * 0.28,
+    w: size.w * 0.66,
+    h: size.h * 0.56,
+  };
+}
+
 function spawnFishSchool() {
-  const centerY = WORLD.surfaceY + 70 + Math.random() * (WORLD.floorY - WORLD.surfaceY - 140);
+  const centerY = WORLD.surfaceY + 80 + Math.random() * (WORLD.floorY - WORLD.surfaceY - 160);
+  const fishCount = 1 + Math.floor(Math.random() * 20);
+  const schoolSpan = 40 + Math.min(240, fishCount * 14);
+  const schoolHeight = 68;
   const school = {
     x: WORLD.width + 60,
     y: centerY,
+    span: schoolSpan,
     fishes: [],
-    passed: false,
   };
 
-  for (let i = 0; i < FISH_GROUP_SIZE; i += 1) {
+  for (let i = 0; i < fishCount; i += 1) {
     school.fishes.push({
-      ox: i * 26 + (Math.random() * 8 - 4),
-      oy: (Math.random() * 34) - 17,
+      ox: Math.random() * schoolSpan,
+      oy: (Math.random() * schoolHeight) - schoolHeight / 2,
       w: 28,
       h: 14,
       eaten: false,
@@ -97,6 +125,19 @@ function spawnFishSchool() {
   }
 
   state.fishSchools.push(school);
+}
+
+function spawnObstacle() {
+  const size = 34 + Math.random() * 22;
+  const y = WORLD.surfaceY + size + 45 + Math.random() * (WORLD.floorY - WORLD.surfaceY - size * 2 - 90);
+  state.obstacles.push({
+    x: WORLD.width + 90,
+    y,
+    r: size * 0.5,
+    w: size,
+    h: size,
+    spin: Math.random() * Math.PI * 2,
+  });
 }
 
 function flap() {
@@ -109,6 +150,12 @@ function flap() {
   state.shark.vy = WORLD.flapImpulse;
 }
 
+function growShark() {
+  const s = state.shark;
+  s.scale = Math.min(MAX_GROWTH_MULTIPLIER, s.scale + 0.04);
+  sizeValue.textContent = `x${s.scale.toFixed(1)}`;
+}
+
 function update(dtMs) {
   if (state.mode !== "playing") {
     return;
@@ -117,23 +164,30 @@ function update(dtMs) {
   const s = state.shark;
   state.elapsedMs += dtMs;
   const dt = Math.min(2, dtMs / 16.67);
+  const size = sharkSize();
 
   s.vy += WORLD.gravity * dt;
   s.y += s.vy * dt;
   s.flapTick += 0.16 * dt;
+  s.biteTimer = Math.max(0, s.biteTimer - dtMs);
 
-  if (s.y - s.h * 0.4 <= WORLD.surfaceY || s.y + s.h * 0.5 >= WORLD.floorY) {
+  if (s.y - size.h * 0.4 <= WORLD.surfaceY || s.y + size.h * 0.5 >= WORLD.floorY) {
     endGame();
     return;
   }
 
-  if (state.elapsedMs - state.lastSpawnMs > state.spawnEveryMs) {
-    state.lastSpawnMs = state.elapsedMs;
+  if (state.elapsedMs - state.lastFishSpawnMs > state.fishSpawnEveryMs) {
+    state.lastFishSpawnMs = state.elapsedMs;
     spawnFishSchool();
   }
+  if (state.elapsedMs - state.lastObstacleSpawnMs > state.obstacleSpawnEveryMs) {
+    state.lastObstacleSpawnMs = state.elapsedMs;
+    spawnObstacle();
+  }
 
-  state.speed = Math.min(5.8, 2.2 + state.elapsedMs * 0.00008);
-  state.spawnEveryMs = Math.max(820, 1650 - state.elapsedMs * 0.08);
+  state.speed = Math.min(6.2, 2.2 + state.elapsedMs * 0.00009);
+  state.fishSpawnEveryMs = Math.max(720, 1650 - state.elapsedMs * 0.08);
+  state.obstacleSpawnEveryMs = Math.max(980, 2100 - state.elapsedMs * 0.06);
 
   for (const b of state.bubbles) {
     b.y -= b.speed * dt;
@@ -147,6 +201,8 @@ function update(dtMs) {
     if (b.x > WORLD.width + 10) b.x = -10;
   }
 
+  const sharkBox = sharkHitbox();
+
   for (const school of state.fishSchools) {
     school.x -= state.speed * dt;
 
@@ -158,38 +214,47 @@ function update(dtMs) {
       const fishY = school.y + fish.oy + wobble;
 
       if (aabbOverlap(
-        s.x - s.w * 0.34,
-        s.y - s.h * 0.28,
-        s.w * 0.66,
-        s.h * 0.56,
+        sharkBox.x,
+        sharkBox.y,
+        sharkBox.w,
+        sharkBox.h,
         fishX - fish.w * 0.5,
         fishY - fish.h * 0.5,
         fish.w,
         fish.h
       )) {
         fish.eaten = true;
+        s.biteTimer = 220;
         state.score += 1;
         scoreValue.textContent = String(state.score);
-      }
-    }
-
-    if (!school.passed && school.x + FISH_GROUP_SIZE * 26 < s.x - s.w * 0.5) {
-      school.passed = true;
-      const leftBehind = school.fishes.some((f) => !f.eaten);
-      if (leftBehind) {
-        state.misses += 1;
-        missValue.textContent = `${state.misses} / ${MAX_MISSES}`;
-        if (state.misses >= MAX_MISSES) {
-          endGame();
-          return;
-        }
+        growShark();
       }
     }
   }
 
+  for (const obstacle of state.obstacles) {
+    obstacle.x -= (state.speed + 0.8) * dt;
+    obstacle.spin += 0.05 * dt;
+
+    if (aabbOverlap(
+      sharkBox.x,
+      sharkBox.y,
+      sharkBox.w,
+      sharkBox.h,
+      obstacle.x - obstacle.w * 0.5,
+      obstacle.y - obstacle.h * 0.5,
+      obstacle.w,
+      obstacle.h
+    )) {
+      endGame();
+      return;
+    }
+  }
+
   state.fishSchools = state.fishSchools.filter(
-    (school) => school.x > -180 && school.fishes.some((f) => !f.eaten)
+    (school) => school.x + school.span > -80 && school.fishes.some((f) => !f.eaten)
   );
+  state.obstacles = state.obstacles.filter((obstacle) => obstacle.x + obstacle.w > -60);
 }
 
 function aabbOverlap(ax, ay, aw, ah, bx, by, bw, bh) {
@@ -215,6 +280,7 @@ function draw() {
 
   if (state.mode === "playing" || state.mode === "over") {
     drawFishSchools();
+    drawObstacles();
     drawShark(state.shark);
   }
 
@@ -274,8 +340,11 @@ function drawSeafloor() {
 }
 
 function drawShark(s) {
+  const size = sharkSize();
   const bob = Math.sin(s.flapTick) * 2;
   const tailSwing = Math.sin(s.flapTick * 2.3) * 8;
+  const biteOpen = s.biteTimer > 0 ? 1 : 0;
+  const mouthOpenAmount = 8 + biteOpen * 8;
 
   ctx.save();
   ctx.translate(s.x, s.y + bob);
@@ -283,66 +352,68 @@ function drawShark(s) {
   const tilt = Math.max(-0.42, Math.min(0.38, s.vy * 0.045));
   ctx.rotate(tilt);
 
-  // Body
   ctx.fillStyle = "#95a9b8";
   ctx.beginPath();
-  ctx.ellipse(0, 0, s.w * 0.45, s.h * 0.46, 0, 0, Math.PI * 2);
+  ctx.ellipse(0, 0, size.w * 0.45, size.h * 0.46, 0, 0, Math.PI * 2);
   ctx.fill();
 
-  // Back
   ctx.fillStyle = "#7f93a2";
   ctx.beginPath();
-  ctx.ellipse(-8, -4, s.w * 0.34, s.h * 0.3, 0, 0, Math.PI * 2);
+  ctx.ellipse(-size.w * 0.1, -size.h * 0.1, size.w * 0.34, size.h * 0.3, 0, 0, Math.PI * 2);
   ctx.fill();
 
-  // Belly
   ctx.fillStyle = "#e7eef2";
   ctx.beginPath();
-  ctx.ellipse(8, 8, s.w * 0.28, s.h * 0.2, 0, 0, Math.PI * 2);
+  ctx.ellipse(size.w * 0.1, size.h * 0.18, size.w * 0.28, size.h * 0.2, 0, 0, Math.PI * 2);
   ctx.fill();
 
-  // Tail
   ctx.fillStyle = "#8195a4";
   ctx.beginPath();
-  ctx.moveTo(-s.w * 0.4, -2);
-  ctx.lineTo(-s.w * 0.62, -14 + tailSwing * 0.2);
-  ctx.lineTo(-s.w * 0.57, 0);
-  ctx.lineTo(-s.w * 0.62, 14 - tailSwing * 0.2);
+  ctx.moveTo(-size.w * 0.4, -2);
+  ctx.lineTo(-size.w * 0.62, -size.h * 0.34 + tailSwing * 0.2);
+  ctx.lineTo(-size.w * 0.57, 0);
+  ctx.lineTo(-size.w * 0.62, size.h * 0.34 - tailSwing * 0.2);
   ctx.closePath();
   ctx.fill();
 
-  // Top fin
   ctx.fillStyle = "#6f8492";
   ctx.beginPath();
-  ctx.moveTo(-5, -10);
-  ctx.lineTo(12, -34);
-  ctx.lineTo(20, -8);
+  ctx.moveTo(-size.w * 0.05, -size.h * 0.25);
+  ctx.lineTo(size.w * 0.14, -size.h * 0.82);
+  ctx.lineTo(size.w * 0.22, -size.h * 0.2);
   ctx.closePath();
   ctx.fill();
 
-  // Side fin
   ctx.beginPath();
-  ctx.moveTo(0, 8);
-  ctx.lineTo(20, 17);
-  ctx.lineTo(4, 22);
+  ctx.moveTo(0, size.h * 0.18);
+  ctx.lineTo(size.w * 0.24, size.h * 0.4);
+  ctx.lineTo(size.w * 0.05, size.h * 0.52);
   ctx.closePath();
   ctx.fill();
 
-  // Eye
   ctx.fillStyle = "#fff";
   ctx.beginPath();
-  ctx.arc(20, -6, 4.2, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = "#121212";
-  ctx.beginPath();
-  ctx.arc(21, -5.2, 2, 0, Math.PI * 2);
+  ctx.arc(size.w * 0.24, -size.h * 0.14, Math.max(3.2, size.w * 0.05), 0, Math.PI * 2);
   ctx.fill();
 
-  // Smile / mouth
-  ctx.strokeStyle = "#334955";
-  ctx.lineWidth = 2;
+  ctx.fillStyle = "#121212";
   ctx.beginPath();
-  ctx.arc(19, 4, 9, 0.2, 1.35, false);
+  ctx.arc(size.w * 0.25, -size.h * 0.13, Math.max(1.6, size.w * 0.024), 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = "#f5fbff";
+  ctx.beginPath();
+  ctx.moveTo(size.w * 0.06, size.h * 0.1);
+  ctx.lineTo(size.w * 0.44, size.h * (0.1 + mouthOpenAmount * 0.02));
+  ctx.lineTo(size.w * 0.2, size.h * (0.28 + mouthOpenAmount * 0.02));
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.strokeStyle = "#334955";
+  ctx.lineWidth = Math.max(2, size.w * 0.025);
+  ctx.beginPath();
+  ctx.moveTo(size.w * 0.08, size.h * 0.06);
+  ctx.lineTo(size.w * 0.42, size.h * (0.08 + mouthOpenAmount * 0.02));
   ctx.stroke();
 
   ctx.restore();
@@ -383,6 +454,32 @@ function drawFishSchools() {
   }
 }
 
+function drawObstacles() {
+  for (const obstacle of state.obstacles) {
+    ctx.save();
+    ctx.translate(obstacle.x, obstacle.y);
+    ctx.rotate(obstacle.spin);
+
+    ctx.fillStyle = "#8b4d58";
+    ctx.beginPath();
+    ctx.arc(0, 0, obstacle.r, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = "#efb2be";
+    for (let i = 0; i < 8; i += 1) {
+      ctx.rotate(Math.PI / 4);
+      ctx.beginPath();
+      ctx.moveTo(obstacle.r * 0.65, 0);
+      ctx.lineTo(obstacle.r * 1.2, -4);
+      ctx.lineTo(obstacle.r * 1.2, 4);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    ctx.restore();
+  }
+}
+
 function loop(timestamp) {
   if (!state.lastTime) {
     state.lastTime = timestamp;
@@ -396,6 +493,23 @@ function loop(timestamp) {
 }
 
 function attachEvents() {
+  let lastTapMs = 0;
+
+  const onTapOrClick = (e) => {
+    if (e.target.closest("button")) {
+      return;
+    }
+    const now = performance.now();
+    if (now - lastTapMs < 220) {
+      return;
+    }
+    lastTapMs = now;
+    if (e.cancelable) {
+      e.preventDefault();
+    }
+    flap();
+  };
+
   window.addEventListener("keydown", (e) => {
     if (e.code === "Space") {
       e.preventDefault();
@@ -403,7 +517,9 @@ function attachEvents() {
     }
   });
 
-  canvas.addEventListener("pointerdown", flap);
+  canvasWrap.addEventListener("pointerdown", onTapOrClick);
+  canvasWrap.addEventListener("touchstart", onTapOrClick, { passive: false });
+  canvasWrap.addEventListener("click", onTapOrClick);
   restartBtn.addEventListener("click", resetGame);
 }
 
